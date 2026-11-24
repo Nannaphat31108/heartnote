@@ -155,7 +155,7 @@ import { createDB } from "./db.js";
       </div>
       <div class="landing-right">
         <p class="eyebrow">${ICON.spark} การ์ดเติมพลังใจ</p>
-        <h1 class="title-xl">เติมพลังใจครู</h1>
+        <h1 class="title-xl">HeartNote</h1>
         <p class="lead">โปรแกรมส่งเสริมสุขภาวะทางอารมณ์ด้วยการ์ดคำถามสะท้อนตนเองในรูปแบบออนไลน์ สำหรับนักศึกษาวิชาชีพครูชั้นปีที่ 1</p>
         <p class="welcome"><b>ยินดีต้อนรับ</b> — เริ่มต้นดูแลใจ เพื่อก้าวสู่การเป็นครูที่มีความสุขไปด้วยกัน</p>
 
