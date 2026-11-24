@@ -167,7 +167,7 @@ import { createDB } from "./db.js";
             <label class="field"><span class="fi">${ICON.mail}</span><input name="email" type="email" placeholder="อีเมล" required /></label>
             <label class="field"><span class="fi">${ICON.lock}</span><input name="password" type="password" placeholder="รหัสผ่าน" required /></label>
             <button class="btn btn-primary btn-block" type="submit">เข้าสู่ระบบ</button>
-            ${DB.mode === "firebase" ? '<button class="link-btn forgot" id="forgotBtn" type="button">ลืมรหัสผ่าน?</button>' : ""}
+            ${DB.canResetPassword ? '<button class="link-btn forgot" id="forgotBtn" type="button">ลืมรหัสผ่าน?</button>' : ""}
           </form>
 
           <form id="registerForm" class="form" hidden autocomplete="on">
@@ -177,7 +177,7 @@ import { createDB } from "./db.js";
             <button class="btn btn-primary btn-block" type="submit">เริ่มต้นใช้งาน</button>
           </form>
 
-          <p class="fine">${DB.mode === "firebase"
+          <p class="fine">${DB.mode === "cloud"
             ? "บันทึกของคุณถูกเก็บอย่างปลอดภัยในฐานข้อมูล เข้าใช้ได้จากทุกอุปกรณ์"
             : "โหมดทดลอง: ข้อมูลถูกเก็บไว้ในเบราว์เซอร์ของเครื่องนี้เท่านั้น"}</p>
         </div>
@@ -209,17 +209,35 @@ import { createDB } from "./db.js";
       busy(rf, true);
       const name = rf.name.value.trim();
       try {
-        await DB.register(name, rf.email.value.trim().toLowerCase(), rf.password.value);
-        toast("ยินดีต้อนรับนะ " + name + " 💛");
+        const email = rf.email.value.trim().toLowerCase();
+        const r = await DB.register(name, email, rf.password.value);
+        if (r && r.needConfirm) {
+          rf.reset();
+          $app.querySelector('.tab[data-tab="login"]').click();
+          lf.email.value = email;
+          showNote(`ส่งอีเมลยืนยันไปที่ <b>${esc(email)}</b> แล้ว กดลิงก์ในอีเมล (ดูในโฟลเดอร์สแปมด้วย) แล้วกลับมาเข้าสู่ระบบได้เลย 💌`);
+        } else {
+          toast("ยินดีต้อนรับนะ " + name + " 💛");
+        }
       } catch (err) { toast(err.message); }
       busy(rf, false);
     });
+
+    function showNote(html) {
+      let n = $app.querySelector(".auth-note");
+      if (!n) {
+        n = document.createElement("p");
+        n.className = "auth-note";
+        $app.querySelector(".tabs").after(n);
+      }
+      n.innerHTML = html;
+    }
 
     const fb = $app.querySelector("#forgotBtn");
     if (fb) fb.addEventListener("click", async () => {
       const email = lf.email.value.trim().toLowerCase();
       if (!email) { toast("กรอกอีเมลก่อน แล้วกด “ลืมรหัสผ่าน?” อีกครั้ง"); lf.email.focus(); return; }
-      try { await DB.resetPassword(email); toast("ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่อีเมลแล้ว"); } catch (err) { toast(err.message); }
+      try { await DB.resetPassword(email); showNote(`ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่ <b>${esc(email)}</b> แล้ว`); } catch (err) { toast(err.message); }
     });
   }
 
@@ -665,21 +683,6 @@ import { createDB } from "./db.js";
 
   /* ---------------- admin ---------------- */
   async function viewAdmin(user) {
-    if (user.adminPending) {
-      $app.innerHTML = `
-      <section class="panel">
-        <div class="panel-head"><span class="ph-icon">${ICON.mail}</span><div>
-          <h2>ยืนยันอีเมลผู้ดูแลก่อนนะ</h2>
-          <p class="muted">เพื่อความปลอดภัยของข้อมูลนักศึกษา ผู้ดูแลต้องยืนยันอีเมล ${esc(user.email)} ก่อน
-          กดปุ่มด้านล่าง เปิดลิงก์ในอีเมล แล้วออกจากระบบและเข้าสู่ระบบใหม่อีกครั้ง</p>
-        </div></div>
-        <button class="btn btn-primary" id="verifyBtn" type="button">${ICON.mail} ส่งอีเมลยืนยัน</button>
-      </section>`;
-      $app.querySelector("#verifyBtn").addEventListener("click", async () => {
-        try { await DB.sendVerify(); toast("ส่งอีเมลยืนยันแล้ว ตรวจกล่องจดหมายได้เลย"); } catch (e) { toast(e.message); }
-      });
-      return;
-    }
     if (!user.isAdmin) { location.replace("#/categories"); return; }
 
     $app.innerHTML = `<section class="panel"><p class="muted center">กำลังโหลดข้อมูลนักศึกษา…</p></section>`;
@@ -777,6 +780,37 @@ import { createDB } from "./db.js";
     });
   }
 
+  /* ---------------- ตั้งรหัสผ่านใหม่ (จากลิงก์ในอีเมล) ---------------- */
+  let recovering = false;
+  function viewNewPassword() {
+    $topbar.hidden = true;
+    $app.innerHTML = `
+    <section class="panel newpass">
+      <div class="panel-head">
+        <span class="ph-icon">${ICON.lock}</span>
+        <div><h2>ตั้งรหัสผ่านใหม่</h2><p class="muted">สำหรับบัญชี ${esc(me ? me.email : "")}</p></div>
+      </div>
+      <form id="npForm" class="form">
+        <label class="field"><span class="fi">${ICON.lock}</span><input name="p1" type="password" placeholder="รหัสผ่านใหม่ (อย่างน้อย ${DB.minPassword} ตัว)" required minlength="${DB.minPassword}" autocomplete="new-password" /></label>
+        <label class="field"><span class="fi">${ICON.lock}</span><input name="p2" type="password" placeholder="ยืนยันรหัสผ่านใหม่อีกครั้ง" required minlength="${DB.minPassword}" autocomplete="new-password" /></label>
+        <button class="btn btn-primary btn-block" type="submit">บันทึกรหัสผ่านใหม่</button>
+      </form>
+    </section>`;
+    const f = $app.querySelector("#npForm");
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (f.p1.value !== f.p2.value) { toast("รหัสผ่านทั้งสองช่องไม่ตรงกัน"); return; }
+      f.querySelector("button").disabled = true;
+      try {
+        await DB.updatePassword(f.p1.value);
+        recovering = false;
+        toast("เปลี่ยนรหัสผ่านเรียบร้อยแล้ว 💛");
+        location.replace("#/");
+        route();
+      } catch (err) { toast(err.message); f.querySelector("button").disabled = false; }
+    });
+  }
+
   /* ---------------- router ---------------- */
   function route() {
     const hash = location.hash.replace(/^#\/?/, "");
@@ -788,6 +822,7 @@ import { createDB } from "./db.js";
       $app.innerHTML = `<div class="loading"><div class="loading-card">${cardBackSVG(CATS[0])}</div><p>กำลังสับไพ่…</p></div>`;
       return;
     }
+    if (user && recovering) { viewNewPassword(); return; }
     if (!user) {
       $topbar.hidden = true;
       document.body.classList.add("is-landing");
@@ -798,7 +833,7 @@ import { createDB } from "./db.js";
     $topbar.hidden = false;
     document.getElementById("avatar").textContent = (user.name || "?").trim().charAt(0) || "?";
     document.getElementById("avatar").title = user.name;
-    document.getElementById("adminLink").hidden = !(user.isAdmin || user.adminPending);
+    document.getElementById("adminLink").hidden = !user.isAdmin;
 
     const active = name === "draw" || name === "reflect" ? "categories" : name;
     document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === active));
@@ -830,11 +865,12 @@ import { createDB } from "./db.js";
   try {
     DB = await createDB();
   } catch (e) {
-    $app.innerHTML = `<section class="panel"><h2>เชื่อมต่อฐานข้อมูลไม่สำเร็จ</h2><p class="muted">ตรวจสอบอินเทอร์เน็ต หรือค่าใน js/firebase-config.js แล้วรีเฟรชหน้าอีกครั้ง</p></section>`;
+    $app.innerHTML = `<section class="panel"><h2>เชื่อมต่อฐานข้อมูลไม่สำเร็จ</h2><p class="muted">ตรวจสอบอินเทอร์เน็ต หรือค่าใน js/supabase-config.js แล้วรีเฟรชหน้าอีกครั้ง</p></section>`;
     return;
   }
 
-  DB.onAuth(async (user, err) => {
+  DB.onAuth(async (user, err, event) => {
+    if (event === "recovery") recovering = true;
     if (err) toast("โหลดข้อมูลผู้ใช้ไม่สำเร็จ ลองรีเฟรชหน้าอีกครั้ง");
     if (user && (!me || me.uid !== user.uid)) {
       try { data = await DB.loadData(user.uid); } catch (e) {
@@ -843,10 +879,10 @@ import { createDB } from "./db.js";
         data = { used: Object.fromEntries(CATS.map((c) => [c.id, []])), entries: [] };
       }
     }
-    if (!user) { data = null; clearDraft(); }
+    if (!user) { data = null; clearDraft(); recovering = false; }
     me = user;
     authReady = true;
-    if (user && (location.hash === "" || location.hash === "#/" || location.hash === "#")) {
+    if (user && !recovering && !/^#\/[a-z]/.test(location.hash)) {
       location.replace(user.isAdmin ? "#/admin" : data.entries.length ? "#/categories" : "#/intro");
       return; // hashchange จะเรียก route()
     }

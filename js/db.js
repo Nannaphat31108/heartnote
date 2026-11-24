@@ -1,9 +1,7 @@
-// ชั้นจัดการข้อมูล: ใช้ Firebase (Auth + Firestore) ถ้าตั้งค่าไว้ ไม่เช่นนั้นใช้ localStorage
-import { firebaseConfig, adminEmails } from "./firebase-config.js";
+// ชั้นจัดการข้อมูล: ใช้ Supabase (PostgreSQL) ถ้าตั้งค่าไว้ ไม่เช่นนั้นใช้ localStorage (โหมดทดลอง)
+import { supabaseConfig } from "./supabase-config.js";
 
-const FB_VER = "10.12.2";
 const CAT_IDS = ["emo", "sat", "mean", "goal"];
-const ADMINS = adminEmails.map((e) => e.trim().toLowerCase());
 
 const emptyUsed = () => Object.fromEntries(CAT_IDS.map((c) => [c, []]));
 const normUsed = (u) => {
@@ -12,96 +10,115 @@ const normUsed = (u) => {
   return out;
 };
 
-/* ======================= Firebase ======================= */
-async function firebaseBackend() {
-  const base = `https://www.gstatic.com/firebasejs/${FB_VER}/`;
-  const [{ initializeApp }, A, F] = await Promise.all([
-    import(base + "firebase-app.js"),
-    import(base + "firebase-auth.js"),
-    import(base + "firebase-firestore.js")
-  ]);
-  const app = initializeApp(firebaseConfig);
-  const auth = A.getAuth(app);
-  const fs = F.getFirestore(app);
-  // สำหรับนักพัฒนา: เปิด http://localhost:.../?emulator เพื่อทดสอบกับ Firebase Emulator
-  if (["localhost", "127.0.0.1"].includes(location.hostname) && new URLSearchParams(location.search).has("emulator")) {
-    A.connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
-    F.connectFirestoreEmulator(fs, "127.0.0.1", 8080);
-  }
-  let pendingName = null;
+/* ======================= Supabase (PostgreSQL) ======================= */
+const SB_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm";
+const PAGE = 1000; // Supabase ส่งได้ครั้งละไม่เกิน 1000 แถว
 
-  const toUser = async (u) => {
-    if (!u) return null;
-    const email = (u.email || "").toLowerCase();
-    let name = u.displayName || pendingName || email.split("@")[0];
-    const ref = F.doc(fs, "users", u.uid);
-    const snap = await F.getDoc(ref);
-    if (!snap.exists()) {
-      await F.setDoc(ref, { name, email, used: emptyUsed(), created: F.serverTimestamp() });
-    } else if (snap.data().name) {
-      name = snap.data().name;
+// เลขข้อที่ตอบแล้วในรอบปัจจุบันของแต่ละหมวด (ครบ 25 ข้อแล้วเริ่มรอบใหม่)
+function deriveUsed(entries) {
+  const used = emptyUsed();
+  CAT_IDS.forEach((c) => {
+    const qs = entries.filter((e) => e.cat === c).map((e) => e.qid);
+    used[c] = qs.slice(qs.length - (qs.length % 25));
+  });
+  return used;
+}
+const fromRow = (r) => ({
+  id: r.id, date: r.date, cat: r.cat, qid: r.qid, question: r.question, answer: r.answer,
+  followQ: r.follow_q, followA: r.follow_a, mood: r.mood, blessing: r.blessing
+});
+
+async function supabaseBackend() {
+  const { createClient } = await import(SB_URL);
+  const sb = createClient(supabaseConfig.url, supabaseConfig.anonKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+  });
+  const here = () => location.origin + location.pathname;
+
+  const ERR = [
+    [/invalid login credentials/i, "อีเมลหรือรหัสผ่านไม่ถูกต้อง"],
+    [/email not confirmed/i, "ยังไม่ได้ยืนยันอีเมล ลองตรวจกล่องจดหมาย (และโฟลเดอร์สแปม) ก่อนนะ"],
+    [/already registered|already exists/i, "อีเมลนี้มีบัญชีแล้ว เข้าสู่ระบบได้เลย"],
+    [/password should be at least|weak/i, "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"],
+    [/invalid.*email|unable to validate email/i, "รูปแบบอีเมลไม่ถูกต้อง"],
+    [/rate limit|too many|security purposes/i, "ลองหลายครั้งเกินไป รอสักครู่แล้วลองใหม่นะ"],
+    [/failed to fetch|network/i, "เชื่อมต่ออินเทอร์เน็ตไม่ได้ ลองใหม่อีกครั้ง"],
+    [/same.*password|different from the old/i, "รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม"]
+  ];
+  const fail = (error) => {
+    const msg = error && (error.message || String(error));
+    const hit = ERR.find(([re]) => re.test(msg || ""));
+    throw new Error(hit ? hit[1] : "เกิดข้อผิดพลาด: " + msg);
+  };
+  const ok = ({ data, error }) => { if (error) fail(error); return data; };
+
+  async function selectAll(build) {
+    const rows = [];
+    for (let from = 0; ; from += PAGE) {
+      const data = ok(await build().range(from, from + PAGE - 1));
+      rows.push(...data);
+      if (data.length < PAGE) return rows;
     }
-    pendingName = null;
-    return { uid: u.uid, name, email, verified: u.emailVerified, isAdmin: ADMINS.includes(email) && u.emailVerified, adminPending: ADMINS.includes(email) && !u.emailVerified };
-  };
+  }
 
-  const ERR = {
-    "auth/invalid-credential": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
-    "auth/wrong-password": "รหัสผ่านไม่ถูกต้อง",
-    "auth/user-not-found": "ยังไม่พบบัญชีนี้ ลองสมัครใช้งานก่อนนะ",
-    "auth/email-already-in-use": "อีเมลนี้มีบัญชีแล้ว เข้าสู่ระบบได้เลย",
-    "auth/weak-password": "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร",
-    "auth/invalid-email": "รูปแบบอีเมลไม่ถูกต้อง",
-    "auth/too-many-requests": "ลองหลายครั้งเกินไป รอสักครู่แล้วลองใหม่นะ",
-    "auth/network-request-failed": "เชื่อมต่ออินเทอร์เน็ตไม่ได้ ลองใหม่อีกครั้ง"
-  };
-  const wrap = async (fn) => {
-    try { return await fn(); } catch (e) { throw new Error(ERR[e.code] || "เกิดข้อผิดพลาด: " + (e.code || e.message)); }
-  };
+  async function toUser(u) {
+    if (!u) return null;
+    const [prof, adm] = await Promise.all([
+      sb.from("profiles").select("name").eq("id", u.id).maybeSingle(),
+      sb.rpc("is_admin")
+    ]);
+    const name = (prof.data && prof.data.name) || (u.user_metadata && u.user_metadata.name) || (u.email || "").split("@")[0];
+    return { uid: u.id, name, email: (u.email || "").toLowerCase(), isAdmin: adm.data === true };
+  }
 
   return {
-    mode: "firebase",
+    mode: "cloud",
     minPassword: 6,
+    canResetPassword: true,
     onAuth(cb) {
-      A.onAuthStateChanged(auth, async (u) => {
-        try { cb(await toUser(u)); } catch (e) { console.error(e); cb(null, e); }
+      let lastUid;
+      sb.auth.onAuthStateChange((event, session) => {
+        const u = session ? session.user : null;
+        const uid = u ? u.id : null;
+        // ต่ออายุ token ไม่ต้องรีเฟรชหน้า (ไม่อย่างนั้นคำตอบที่กำลังพิมพ์จะหาย)
+        if (uid === lastUid && event !== "PASSWORD_RECOVERY") return;
+        lastUid = uid;
+        // supabase แนะนำว่าไม่ให้เรียก API ภายใน callback โดยตรง
+        setTimeout(async () => {
+          try { cb(await toUser(u), null, event === "PASSWORD_RECOVERY" ? "recovery" : null); }
+          catch (e) { console.error(e); cb(null, e); }
+        }, 0);
       });
     },
-    register: (name, email, pass) => wrap(async () => {
-      pendingName = name;
-      const cred = await A.createUserWithEmailAndPassword(auth, email, pass);
-      await A.updateProfile(cred.user, { displayName: name });
-    }),
-    login: (email, pass) => wrap(() => A.signInWithEmailAndPassword(auth, email, pass)),
-    logout: () => A.signOut(auth),
-    resetPassword: (email) => wrap(() => A.sendPasswordResetEmail(auth, email)),
-    sendVerify: () => wrap(() => A.sendEmailVerification(auth.currentUser)),
+    async register(name, email, pass) {
+      const data = ok(await sb.auth.signUp({ email, password: pass, options: { data: { name }, emailRedirectTo: here() } }));
+      return { needConfirm: !data.session };
+    },
+    async login(email, pass) { ok(await sb.auth.signInWithPassword({ email, password: pass })); },
+    async logout() { await sb.auth.signOut(); },
+    async resetPassword(email) { ok(await sb.auth.resetPasswordForEmail(email, { redirectTo: here() })); },
+    async updatePassword(pass) { ok(await sb.auth.updateUser({ password: pass })); },
     async loadData(uid) {
-      const [u, q] = await Promise.all([
-        F.getDoc(F.doc(fs, "users", uid)),
-        F.getDocs(F.query(F.collection(fs, "users", uid, "entries"), F.orderBy("date")))
-      ]);
-      return { used: normUsed(u.exists() ? u.data().used : null), entries: q.docs.map((d) => d.data()) };
+      const rows = await selectAll(() => sb.from("entries").select("*").eq("user_id", uid).order("date").order("id"));
+      const entries = rows.map(fromRow);
+      return { used: deriveUsed(entries), entries };
     },
-    async addEntry(uid, entry) {
-      const batch = F.writeBatch(fs);
-      batch.set(F.doc(fs, "users", uid, "entries", entry.id), entry);
-      batch.update(F.doc(fs, "users", uid), { ["used." + entry.cat]: F.arrayUnion(entry.qid), lastActive: F.serverTimestamp() });
-      await batch.commit();
+    async addEntry(uid, e) {
+      ok(await sb.from("entries").insert({
+        id: e.id, date: e.date, cat: e.cat, qid: e.qid, question: e.question, answer: e.answer,
+        follow_q: e.followQ, follow_a: e.followA, mood: e.mood, blessing: e.blessing
+      }));
     },
-    async resetUsed(uid, cat) {
-      await F.updateDoc(F.doc(fs, "users", uid), { ["used." + cat]: [] });
-    },
+    async resetUsed() { /* คำนวณจากบันทึกอัตโนมัติ ไม่ต้องเก็บแยก */ },
     async listAll() {
-      const [users, entries] = await Promise.all([
-        F.getDocs(F.collection(fs, "users")),
-        F.getDocs(F.collectionGroup(fs, "entries"))
+      const [profiles, rows] = await Promise.all([
+        selectAll(() => sb.from("profiles").select("id,name,email").order("created_at")),
+        selectAll(() => sb.from("entries").select("*").order("date").order("id"))
       ]);
       const byUid = {};
-      users.docs.forEach((d) => { byUid[d.id] = { uid: d.id, name: d.data().name, email: d.data().email, entries: [] }; });
-      entries.docs.forEach((d) => {
-        const uid = d.ref.parent.parent.id;
-        (byUid[uid] = byUid[uid] || { uid, name: "?", email: "", entries: [] }).entries.push(d.data());
+      profiles.forEach((p) => { byUid[p.id] = { uid: p.id, name: p.name, email: p.email, entries: [] }; });
+      rows.forEach((r) => {
+        (byUid[r.user_id] = byUid[r.user_id] || { uid: r.user_id, name: "?", email: "", entries: [] }).entries.push(fromRow(r));
       });
       return Object.values(byUid);
     }
@@ -127,7 +144,7 @@ function localBackend() {
   }
   const userOf = (email) => {
     const u = email && get(USERS, {})[email];
-    return u ? { uid: email, name: u.name, email, verified: true, isAdmin: ADMINS.includes(email), adminPending: false } : null;
+    return u ? { uid: email, name: u.name, email, isAdmin: false } : null;
   };
   const emit = () => listener(userOf(get(SESSION, null)));
   const data = (uid) => {
@@ -138,12 +155,14 @@ function localBackend() {
   return {
     mode: "local",
     minPassword: 4,
+    canResetPassword: false,
     onAuth(cb) { listener = cb; emit(); },
     async register(name, email, pass) {
       const users = get(USERS, {});
       if (users[email]) throw new Error("อีเมลนี้มีบัญชีแล้ว เข้าสู่ระบบได้เลย");
       users[email] = { name, email, pass: await hash(pass), created: new Date().toISOString() };
       set(USERS, users); set(SESSION, email); emit();
+      return { needConfirm: false };
     },
     async login(email, pass) {
       const u = get(USERS, {})[email];
@@ -153,7 +172,7 @@ function localBackend() {
     },
     async logout() { try { localStorage.removeItem(SESSION); } catch (e) { /* ignore */ } emit(); },
     async resetPassword() { throw new Error("โหมดทดลองยังรีเซ็ตรหัสผ่านไม่ได้ ต้องเชื่อมฐานข้อมูลก่อน"); },
-    async sendVerify() {},
+    async updatePassword() {},
     async loadData(uid) { return data(uid); },
     async addEntry(uid, entry) {
       const d = data(uid);
@@ -169,8 +188,6 @@ function localBackend() {
 }
 
 export async function createDB() {
-  if (firebaseConfig.apiKey && firebaseConfig.projectId) {
-    try { return await firebaseBackend(); } catch (e) { console.error("โหลด Firebase ไม่สำเร็จ", e); throw e; }
-  }
+  if (supabaseConfig.url && supabaseConfig.anonKey) return supabaseBackend();
   return localBackend();
 }
