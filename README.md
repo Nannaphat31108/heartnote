@@ -72,6 +72,12 @@ group by p.id order by times desc;
 ```
 
 ## เผยแพร่เว็บ
+**Render** (ใช้ไฟล์ `render.yaml`):
+1. สมัคร https://render.com ด้วย GitHub แล้วอนุญาตให้ Render เข้าถึง repo `heartnote`
+2. Dashboard → **New → Blueprint** → เลือก repo `heartnote` → **Apply**
+3. ได้ที่อยู่เว็บ เช่น `https://heartnote-xxxx.onrender.com` → นำไปใส่ใน Supabase
+   Authentication → URL Configuration (Site URL และ Redirect URLs)
+
 **GitHub Pages**: Settings → Pages → Deploy from branch แล้วนำที่อยู่เว็บไปใส่ในข้อ 4 ด้านบน
 
 ## โหมดทดลอง (ยังไม่ตั้งค่า Supabase)

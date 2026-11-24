@@ -1,0 +1,15 @@
+# ตั้งค่าสำหรับ Render (Static Site) — ใช้ผ่านเมนู New → Blueprint
+services:
+  - type: web
+    name: heartnote
+    runtime: static
+    branch: claude/loving-bohr-wgkeny
+    buildCommand: ""
+    staticPublishPath: .
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
