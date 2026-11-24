@@ -25,11 +25,17 @@ create table if not exists public.entries (
   question    text not null check (char_length(question) <= 500),
   answer      text not null check (char_length(answer) between 1 and 5000),
   follow_q    text not null check (char_length(follow_q) <= 500),
-  follow_a    text not null check (char_length(follow_a) between 1 and 5000),
+  follow_a    text not null check (char_length(follow_a) between 1 and 5000),   -- สะท้อนตน ข้อ 1
+  follow_a2   text not null default '' check (char_length(follow_a2) <= 5000),  -- สะท้อนตน ข้อ 2
+  follow_a3   text not null default '' check (char_length(follow_a3) <= 5000),  -- สะท้อนตน ข้อ 3
   mood        smallint not null check (mood between 1 and 5),
   blessing    text not null default '' check (char_length(blessing) <= 500),
   created_at  timestamptz not null default now()
 );
+-- สำหรับฐานข้อมูลที่สร้างจาก schema รุ่นก่อน (มีคำถามสะท้อนตนแค่ข้อเดียว)
+alter table public.entries add column if not exists follow_a2 text not null default '' check (char_length(follow_a2) <= 5000);
+alter table public.entries add column if not exists follow_a3 text not null default '' check (char_length(follow_a3) <= 5000);
+
 create index if not exists entries_user_date_idx on public.entries (user_id, date);
 
 -- รายชื่อผู้ดูแล/ผู้วิจัย (เพิ่มด้วย SQL เท่านั้น — ดู README)
@@ -124,5 +130,5 @@ create policy "admins: read own" on public.admins
 revoke all on public.profiles, public.entries, public.admins from anon, authenticated;
 grant select on public.profiles, public.entries, public.admins to authenticated;
 grant update (name) on public.profiles to authenticated;
-grant insert (id, date, cat, qid, question, answer, follow_q, follow_a, mood, blessing) on public.entries to authenticated;
+grant insert (id, date, cat, qid, question, answer, follow_q, follow_a, follow_a2, follow_a3, mood, blessing) on public.entries to authenticated;
 grant execute on function public.is_admin() to authenticated;

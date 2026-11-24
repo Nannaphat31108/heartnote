@@ -5,10 +5,11 @@ import { createDB } from "./db.js";
 
   const CATS = window.CATEGORIES;
   const BLESS = window.BLESSINGS;
+  const REFLECT = window.REFLECTIONS;
   const MOODS = window.MOODS;
-  const TOTAL_SESSIONS = 40; // 8 สัปดาห์ x 5 ครั้ง
+  const TOTAL_SESSIONS = 24; // 8 สัปดาห์ x 3 ครั้ง
   const WEEKS = 8;
-  const PER_WEEK = 5;
+  const PER_WEEK = 3;
   const DECK_SIZE = 7;
 
   const $app = document.getElementById("app");
@@ -141,6 +142,7 @@ import { createDB } from "./db.js";
   /* ---------------- draft (การ์ดที่กำลังทำ) ---------------- */
   let draft = null;
   try { draft = JSON.parse(sessionStorage.getItem("hn_draft") || "null"); } catch (e) { draft = null; }
+  if (draft && !Array.isArray(draft.reflect)) draft.reflect = ["", "", ""];
   const saveDraft = () => { try { sessionStorage.setItem("hn_draft", JSON.stringify(draft)); } catch (e) { /* ignore */ } };
   const clearDraft = () => { draft = null; try { sessionStorage.removeItem("hn_draft"); } catch (e) { /* ignore */ } };
 
@@ -254,9 +256,9 @@ import { createDB } from "./db.js";
       <div class="intro-grid">
         <ul class="steps">
           <li><span class="si">${ICON.calendar}</span><div><b>ระยะเวลาในการทำโปรแกรม 8 สัปดาห์</b><small>ค่อย ๆ เติมพลังใจไปทีละนิด</small></div></li>
-          <li><span class="si">${ICON.clock}</span><div><b>สัปดาห์ละ 5 ครั้ง</b><small>ครั้งละประมาณ 10–15 นาที รวม 40 ครั้ง</small></div></li>
+          <li><span class="si">${ICON.clock}</span><div><b>สัปดาห์ละ 3 ครั้ง (3 วัน)</b><small>ครั้งละประมาณ 10–15 นาที รวมทั้งสิ้น 24 ครั้ง</small></div></li>
           <li><span class="si">${ICON.cards}</span><div><b>เลือกหมวดคำถามที่สนใจ แล้วสุ่มการ์ด 1 ใบ</b><small>ตั้งจิตอธิษฐานสั้น ๆ แล้วเลือกการ์ดที่ใจเรียก</small></div></li>
-          <li><span class="si">${ICON.note}</span><div><b>ตอบคำถามบนการ์ด และสะท้อนตนเองเพิ่มอีก 1 ข้อ</b><small>ไม่มีคำตอบถูกหรือผิด เขียนตามความรู้สึกจริงได้เลย</small></div></li>
+          <li><span class="si">${ICON.note}</span><div><b>ตอบคำถามบนการ์ด แล้วสะท้อนตนเองต่ออีก 3 ข้อ</b><small>ไม่มีคำตอบถูกหรือผิด เขียนตามความรู้สึกจริงได้เลย</small></div></li>
           <li><span class="si">${ICON.shuffle}</span><div><b>ระบบจะไม่สุ่มคำถามซ้ำในหมวดเดิมจนกว่าจะครบ 25 ข้อ</b><small>4 หมวด รวมทั้งหมด 100 คำถาม</small></div></li>
         </ul>
         <div class="intro-side">
@@ -392,9 +394,9 @@ import { createDB } from "./db.js";
         qid,
         question: cat.questions[qid],
         blessing: pick(BLESS),
-        followQ: pick(cat.followUps),
+
         answer: "",
-        followA: "",
+        reflect: ["", "", ""],
         mood: null
       };
       saveDraft();
@@ -483,16 +485,17 @@ import { createDB } from "./db.js";
         </div>
       </div>
 
+      ${REFLECT.map((q, i) => `
       <div class="qblock">
-        <span class="qnum">1</span>
+        <span class="qnum">${i + 1}</span>
         <div class="qbody">
-          <label for="followA">${esc(draft.followQ)}</label>
-          <textarea id="followA" rows="4" placeholder="พิมพ์คำตอบของคุณ…">${esc(draft.followA)}</textarea>
+          <label for="refl${i}">${esc(q)}</label>
+          <textarea id="refl${i}" class="refl" data-i="${i}" rows="3" placeholder="พิมพ์คำตอบของคุณ…">${esc(draft.reflect[i])}</textarea>
         </div>
-      </div>
+      </div>`).join("")}
 
       <div class="qblock">
-        <span class="qnum">2</span>
+        <span class="qnum">${REFLECT.length + 1}</span>
         <div class="qbody">
           <label>หลังจากได้สะท้อนตนเอง ตอนนี้ใจของคุณรู้สึกอย่างไร?</label>
           <div class="moods" role="radiogroup">
@@ -509,8 +512,10 @@ import { createDB } from "./db.js";
       </div>
     </section>`;
 
-    const $f = $app.querySelector("#followA");
-    $f.addEventListener("input", () => { draft.followA = $f.value; saveDraft(); });
+    $app.querySelectorAll(".refl").forEach(($t) => $t.addEventListener("input", () => {
+      draft.reflect[Number($t.dataset.i)] = $t.value;
+      saveDraft();
+    }));
     $app.querySelectorAll(".mood").forEach((b) => b.addEventListener("click", () => {
       draft.mood = Number(b.dataset.mood);
       saveDraft();
@@ -522,7 +527,8 @@ import { createDB } from "./db.js";
     }));
 
     $app.querySelector("#saveBtn").addEventListener("click", async () => {
-      if (!draft.followA.trim()) { toast("ลองตอบคำถามเพิ่มเติมสั้น ๆ อีกนิดนะ"); $f.focus(); return; }
+      const empty = draft.reflect.findIndex((a) => !a.trim());
+      if (empty >= 0) { toast(`ลองตอบข้อ ${empty + 1} สั้น ๆ อีกนิดนะ`); $app.querySelector("#refl" + empty).focus(); return; }
       if (!draft.mood) { toast("เลือกความรู้สึกของคุณตอนนี้ด้วยนะ"); return; }
       const entry = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -531,8 +537,10 @@ import { createDB } from "./db.js";
         qid: draft.qid,
         question: draft.question,
         answer: draft.answer.trim(),
-        followQ: draft.followQ,
-        followA: draft.followA.trim(),
+        followQ: REFLECT[0],
+        followA: draft.reflect[0].trim(),
+        followA2: draft.reflect[1].trim(),
+        followA3: draft.reflect[2].trim(),
         mood: draft.mood,
         blessing: draft.blessing
       };
@@ -574,6 +582,10 @@ import { createDB } from "./db.js";
   }
 
   const moodOf = (id) => MOODS.find((m) => m.id === id) || { emoji: "", label: "" };
+  // คำถาม-คำตอบสะท้อนตนของบันทึกหนึ่งรายการ (รองรับบันทึกเก่าที่มีแค่ 1 ข้อ)
+  const reflectionsOf = (e) => [[e.followQ || REFLECT[0], e.followA], [REFLECT[1], e.followA2], [REFLECT[2], e.followA3]]
+    .filter(([, a]) => a);
+
   function entryHTML(e) {
     const c = catById(e.cat);
     const m = moodOf(e.mood);
@@ -590,8 +602,9 @@ import { createDB } from "./db.js";
             <div class="e-body">
               <p class="e-label">คำตอบ</p>
               <p class="e-text">${esc(e.answer)}</p>
-              <p class="e-label">${esc(e.followQ)}</p>
-              <p class="e-text">${esc(e.followA)}</p>
+              ${reflectionsOf(e).map(([q, a]) => `
+              <p class="e-label">${esc(q)}</p>
+              <p class="e-text">${esc(a)}</p>`).join("")}
               <p class="e-bless">${ICON.spark} ${esc(e.blessing)}</p>
             </div>
           </details>`;
@@ -671,10 +684,13 @@ import { createDB } from "./db.js";
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
   }
 
-  const ENTRY_HEAD = ["วันที่", "เวลา", "หมวด", "คำถามบนการ์ด", "คำตอบ", "คำถามเพิ่มเติม", "คำตอบเพิ่มเติม", "ความรู้สึกหลังทำกิจกรรม", "ระดับความรู้สึก (1-5)"];
+  const ENTRY_HEAD = ["วันที่", "เวลา", "หมวด", "ข้อที่ (1-25)", "คำถามบนการ์ด", "คำตอบ",
+    "สะท้อนตน 1: " + REFLECT[0], "สะท้อนตน 2: " + REFLECT[1], "สะท้อนตน 3: " + REFLECT[2],
+    "ความรู้สึกหลังทำกิจกรรม", "ระดับความรู้สึก (1-5)"];
   const entryRow = (e) => {
     const m = MOODS.find((x) => x.id === e.mood);
-    return [fmtDate(e.date), fmtTime(e.date), catById(e.cat).name, e.question, e.answer, e.followQ, e.followA, m ? m.label : "", e.mood ?? ""];
+    return [fmtDate(e.date), fmtTime(e.date), catById(e.cat).name, e.qid + 1, e.question, e.answer,
+      e.followA || "", e.followA2 || "", e.followA3 || "", m ? m.label : "", e.mood ?? ""];
   };
 
   function exportCSV(user, d) {
