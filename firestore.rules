@@ -1,0 +1,50 @@
+rules_version = '2';
+
+// กฎความปลอดภัยของฐานข้อมูล
+// - นักศึกษาอ่าน/เขียนได้เฉพาะข้อมูลของตัวเอง
+// - บันทึกที่ส่งแล้วแก้ไขหรือลบไม่ได้ (เพื่อความถูกต้องของข้อมูลวิจัย)
+// - ผู้ดูแล (อีเมลที่ยืนยันแล้วในรายชื่อด้านล่าง) อ่านข้อมูลของทุกคนได้
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+          // ใส่อีเมลผู้ดูแลตรงนี้ (ตัวพิมพ์เล็ก) ให้ตรงกับ js/firebase-config.js
+          "researcher@example.com"
+        ];
+    }
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['name', 'email', 'used', 'created'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 60;
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['used', 'lastActive', 'name']);
+      allow delete: if false;
+
+      match /entries/{entryId} {
+        allow read: if isOwner(uid) || isAdmin();
+        allow create: if isOwner(uid)
+          && request.resource.data.id == entryId
+          && request.resource.data.cat in ['emo', 'sat', 'mean', 'goal']
+          && request.resource.data.qid is int && request.resource.data.qid >= 0 && request.resource.data.qid < 25
+          && request.resource.data.answer is string && request.resource.data.answer.size() <= 5000
+          && request.resource.data.followA is string && request.resource.data.followA.size() <= 5000
+          && request.resource.data.mood is int && request.resource.data.mood >= 1 && request.resource.data.mood <= 5;
+        allow update, delete: if false;
+      }
+    }
+
+    // ให้ผู้ดูแลดึงบันทึกของทุกคนในคำสั่งเดียว (collection group query)
+    match /{path=**}/entries/{entryId} {
+      allow read: if isAdmin();
+    }
+  }
+}

@@ -1,4 +1,6 @@
-(() => {
+import { createDB } from "./db.js";
+
+(async () => {
   "use strict";
 
   const CATS = window.CATEGORIES;
@@ -13,51 +15,11 @@
   const $topbar = document.getElementById("topbar");
   const $toast = document.getElementById("toast");
 
-  /* ---------------- storage ---------------- */
-  const store = {
-    get(key, fallback) {
-      try {
-        const v = localStorage.getItem(key);
-        return v ? JSON.parse(v) : fallback;
-      } catch (e) { return fallback; }
-    },
-    set(key, value) {
-      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
-    },
-    del(key) { try { localStorage.removeItem(key); } catch (e) { /* ignore */ } }
-  };
-
-  const USERS_KEY = "hn_users";
-  const SESSION_KEY = "hn_session";
-  const dataKey = (uid) => "hn_data_" + uid;
-
-  function currentUser() {
-    const uid = store.get(SESSION_KEY, null);
-    if (!uid) return null;
-    const users = store.get(USERS_KEY, {});
-    return users[uid] || null;
-  }
-
-  function loadData(uid) {
-    const d = store.get(dataKey(uid), null) || {};
-    d.used = d.used || {};
-    CATS.forEach((c) => { d.used[c.id] = d.used[c.id] || []; });
-    d.entries = d.entries || [];
-    return d;
-  }
-  const saveData = (uid, d) => store.set(dataKey(uid), d);
-
-  async function hash(text) {
-    try {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-      return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-    } catch (e) {
-      // fallback (non-secure contexts)
-      let h = 0;
-      for (let i = 0; i < text.length; i++) h = (Math.imul(31, h) + text.charCodeAt(i)) | 0;
-      return "x" + h;
-    }
-  }
+  /* ---------------- state ---------------- */
+  let DB = null;       // ชั้นฐานข้อมูล (Firebase หรือ localStorage)
+  let me = null;       // ผู้ใช้ที่ล็อกอินอยู่ {uid, name, email, isAdmin}
+  let data = null;     // ข้อมูลของผู้ใช้ {used, entries} (แคชไว้ในหน่วยความจำ)
+  let authReady = false;
 
   /* ---------------- helpers ---------------- */
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -203,18 +165,21 @@
 
           <form id="loginForm" class="form" autocomplete="on">
             <label class="field"><span class="fi">${ICON.mail}</span><input name="email" type="email" placeholder="อีเมล" required /></label>
-            <label class="field"><span class="fi">${ICON.lock}</span><input name="password" type="password" placeholder="รหัสผ่าน" required minlength="4" /></label>
+            <label class="field"><span class="fi">${ICON.lock}</span><input name="password" type="password" placeholder="รหัสผ่าน" required /></label>
             <button class="btn btn-primary btn-block" type="submit">เข้าสู่ระบบ</button>
+            ${DB.mode === "firebase" ? '<button class="link-btn forgot" id="forgotBtn" type="button">ลืมรหัสผ่าน?</button>' : ""}
           </form>
 
           <form id="registerForm" class="form" hidden autocomplete="on">
             <label class="field"><span class="fi">${ICON.user}</span><input name="name" type="text" placeholder="ชื่อเล่น / ชื่อที่อยากให้เรียก" required maxlength="40" /></label>
             <label class="field"><span class="fi">${ICON.mail}</span><input name="email" type="email" placeholder="อีเมล" required /></label>
-            <label class="field"><span class="fi">${ICON.lock}</span><input name="password" type="password" placeholder="ตั้งรหัสผ่าน (อย่างน้อย 4 ตัว)" required minlength="4" /></label>
+            <label class="field"><span class="fi">${ICON.lock}</span><input name="password" type="password" placeholder="ตั้งรหัสผ่าน (อย่างน้อย ${DB.minPassword} ตัว)" required minlength="${DB.minPassword}" /></label>
             <button class="btn btn-primary btn-block" type="submit">เริ่มต้นใช้งาน</button>
           </form>
 
-          <p class="fine">ข้อมูลและบันทึกทั้งหมดถูกเก็บไว้ในเบราว์เซอร์ของเครื่องนี้เท่านั้น</p>
+          <p class="fine">${DB.mode === "firebase"
+            ? "บันทึกของคุณถูกเก็บอย่างปลอดภัยในฐานข้อมูล เข้าใช้ได้จากทุกอุปกรณ์"
+            : "โหมดทดลอง: ข้อมูลถูกเก็บไว้ในเบราว์เซอร์ของเครื่องนี้เท่านั้น"}</p>
         </div>
       </div>
     </section>`;
@@ -228,27 +193,33 @@
       rf.hidden = t.dataset.tab !== "register";
     }));
 
+    const busy = (form, on) => form.querySelectorAll("button, input").forEach((el) => { el.disabled = on; });
+
     lf.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const email = lf.email.value.trim().toLowerCase();
-      const users = store.get(USERS_KEY, {});
-      const u = users[email];
-      if (!u) return toast("ยังไม่พบบัญชีนี้ ลองสมัครใช้งานก่อนนะ");
-      if (u.pass !== (await hash(lf.password.value))) return toast("รหัสผ่านไม่ถูกต้อง ลองอีกครั้งนะ");
-      store.set(SESSION_KEY, email);
-      location.hash = loadData(email).entries.length ? "#/categories" : "#/intro";
+      busy(lf, true);
+      try {
+        await DB.login(lf.email.value.trim().toLowerCase(), lf.password.value);
+      } catch (err) { toast(err.message); }
+      busy(lf, false);
     });
 
     rf.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const email = rf.email.value.trim().toLowerCase();
-      const users = store.get(USERS_KEY, {});
-      if (users[email]) return toast("อีเมลนี้มีบัญชีแล้ว เข้าสู่ระบบได้เลย");
-      users[email] = { name: rf.name.value.trim(), email, pass: await hash(rf.password.value), created: new Date().toISOString() };
-      store.set(USERS_KEY, users);
-      store.set(SESSION_KEY, email);
-      toast("ยินดีต้อนรับนะ " + users[email].name + " 💛");
-      location.hash = "#/intro";
+      busy(rf, true);
+      const name = rf.name.value.trim();
+      try {
+        await DB.register(name, rf.email.value.trim().toLowerCase(), rf.password.value);
+        toast("ยินดีต้อนรับนะ " + name + " 💛");
+      } catch (err) { toast(err.message); }
+      busy(rf, false);
+    });
+
+    const fb = $app.querySelector("#forgotBtn");
+    if (fb) fb.addEventListener("click", async () => {
+      const email = lf.email.value.trim().toLowerCase();
+      if (!email) { toast("กรอกอีเมลก่อน แล้วกด “ลืมรหัสผ่าน?” อีกครั้ง"); lf.email.focus(); return; }
+      try { await DB.resetPassword(email); toast("ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่อีเมลแล้ว"); } catch (err) { toast(err.message); }
     });
   }
 
@@ -284,7 +255,7 @@
   }
 
   function viewCategories(user) {
-    const d = loadData(user.email);
+    const d = data;
     const p = progress(d);
     $app.innerHTML = `
     <section class="panel">
@@ -322,7 +293,7 @@
   function viewDraw(user, catId) {
     const cat = catById(catId);
     if (!cat) { location.hash = "#/categories"; return; }
-    const d = loadData(user.email);
+    const d = data;
 
     // ถ้ามีการ์ดที่เปิดค้างไว้ของหมวดนี้ ให้แสดงต่อ
     if (draft && draft.cat === catId && draft.qid != null) {
@@ -330,7 +301,10 @@
     }
 
     let used = d.used[catId];
-    if (used.length >= 25) { used = d.used[catId] = []; saveData(user.email, d); }
+    if (used.length >= 25) {
+      used = d.used[catId] = [];
+      DB.resetUsed(user.uid, catId).catch((e) => console.error(e));
+    }
     const remaining = cat.questions.map((_, i) => i).filter((i) => !used.includes(i));
 
     $app.innerHTML = `
@@ -529,12 +503,11 @@
       });
     }));
 
-    $app.querySelector("#saveBtn").addEventListener("click", () => {
+    $app.querySelector("#saveBtn").addEventListener("click", async () => {
       if (!draft.followA.trim()) { toast("ลองตอบคำถามเพิ่มเติมสั้น ๆ อีกนิดนะ"); $f.focus(); return; }
       if (!draft.mood) { toast("เลือกความรู้สึกของคุณตอนนี้ด้วยนะ"); return; }
-      const d = loadData(user.email);
-      d.entries.push({
-        id: Date.now().toString(36),
+      const entry = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
         date: new Date().toISOString(),
         cat: draft.cat,
         qid: draft.qid,
@@ -544,9 +517,21 @@
         followA: draft.followA.trim(),
         mood: draft.mood,
         blessing: draft.blessing
-      });
-      if (!d.used[draft.cat].includes(draft.qid)) d.used[draft.cat].push(draft.qid);
-      saveData(user.email, d);
+      };
+      const $btn = $app.querySelector("#saveBtn");
+      $btn.disabled = true;
+      $btn.textContent = "กำลังบันทึก…";
+      try {
+        await DB.addEntry(user.uid, entry);
+      } catch (err) {
+        console.error(err);
+        toast("บันทึกไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้งนะ");
+        $btn.disabled = false;
+        $btn.innerHTML = "บันทึกการ์ดใบนี้ " + ICON.heart;
+        return;
+      }
+      data.entries.push(entry);
+      if (!data.used[entry.cat].includes(entry.qid)) data.used[entry.cat].push(entry.qid);
       clearDraft();
       celebrate();
       location.hash = "#/journal";
@@ -570,12 +555,34 @@
     toast("บันทึกเรียบร้อย เก่งมากเลยนะวันนี้ 💛");
   }
 
+  const moodOf = (id) => MOODS.find((m) => m.id === id) || { emoji: "", label: "" };
+  function entryHTML(e) {
+    const c = catById(e.cat);
+    const m = moodOf(e.mood);
+    return `
+          <details class="entry" style="--c:${c.color};--soft:${c.soft};--deep:${c.deep}">
+            <summary>
+              <span class="e-icon">${ICON[c.icon]}</span>
+              <span class="e-main">
+                <small>${fmtDate(e.date)} · ${fmtTime(e.date)} · ${esc(c.short)}</small>
+                <b>${esc(e.question)}</b>
+              </span>
+              <span class="e-mood" title="${esc(m.label)}">${m.emoji}</span>
+            </summary>
+            <div class="e-body">
+              <p class="e-label">คำตอบ</p>
+              <p class="e-text">${esc(e.answer)}</p>
+              <p class="e-label">${esc(e.followQ)}</p>
+              <p class="e-text">${esc(e.followA)}</p>
+              <p class="e-bless">${ICON.spark} ${esc(e.blessing)}</p>
+            </div>
+          </details>`;
+  }
+
   function viewJournal(user) {
-    const d = loadData(user.email);
+    const d = data;
     const p = progress(d);
     const list = d.entries.slice().reverse();
-    const moodOf = (id) => MOODS.find((m) => m.id === id) || { emoji: "", label: "" };
-
     $app.innerHTML = `
     <section class="journal">
       <div class="panel jr-main">
@@ -587,28 +594,7 @@
           </div>
           ${list.length ? `<button class="btn btn-ghost btn-sm" id="exportBtn" type="button">${ICON.download} ดาวน์โหลด CSV</button>` : ""}
         </div>
-        ${list.length ? `<div class="entries">${list.map((e) => {
-          const c = catById(e.cat);
-          const m = moodOf(e.mood);
-          return `
-          <details class="entry" style="--c:${c.color};--soft:${c.soft};--deep:${c.deep}">
-            <summary>
-              <span class="e-icon">${ICON[c.icon]}</span>
-              <span class="e-main">
-                <small>${fmtDate(e.date)} · ${fmtTime(e.date)} · ${esc(c.short)}</small>
-                <b>${esc(e.question)}</b>
-              </span>
-              <span class="e-mood" title="${esc(m.label)}">${m.emoji}</span>
-            </summary>
-            <div class="e-body">
-              <p class="e-label">คำตอบของฉัน</p>
-              <p class="e-text">${esc(e.answer)}</p>
-              <p class="e-label">${esc(e.followQ)}</p>
-              <p class="e-text">${esc(e.followA)}</p>
-              <p class="e-bless">${ICON.spark} ${esc(e.blessing)}</p>
-            </div>
-          </details>`;
-        }).join("")}</div>` : `
+        ${list.length ? `<div class="entries">${list.map(entryHTML).join("")}</div>` : `
           <div class="empty">
             <div class="empty-cards" aria-hidden="true">${cardBackSVG(CATS[0])}</div>
             <p>ยังไม่มีบันทึกเลย ลองเปิดการ์ดใบแรกของคุณกัน</p>
@@ -655,29 +641,153 @@
     if (ex) ex.addEventListener("click", () => exportCSV(user, d));
   }
 
-  function exportCSV(user, d) {
-    const head = ["วันที่", "เวลา", "หมวด", "คำถามบนการ์ด", "คำตอบ", "คำถามเพิ่มเติม", "คำตอบเพิ่มเติม", "ความรู้สึกหลังทำกิจกรรม"];
+  function downloadCSV(filename, rows) {
     const q = (v) => '"' + String(v ?? "").replace(/"/g, '""') + '"';
-    const rows = d.entries.map((e) => {
-      const m = MOODS.find((x) => x.id === e.mood);
-      return [fmtDate(e.date), fmtTime(e.date), catById(e.cat).name, e.question, e.answer, e.followQ, e.followA, m ? m.label : ""].map(q).join(",");
-    });
-    const csv = "﻿" + [head.map(q).join(","), ...rows].join("\n");
+    const csv = "﻿" + rows.map((r) => r.map(q).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "heartnote-" + (user.name || "journal") + ".csv";
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }
+
+  const ENTRY_HEAD = ["วันที่", "เวลา", "หมวด", "คำถามบนการ์ด", "คำตอบ", "คำถามเพิ่มเติม", "คำตอบเพิ่มเติม", "ความรู้สึกหลังทำกิจกรรม", "ระดับความรู้สึก (1-5)"];
+  const entryRow = (e) => {
+    const m = MOODS.find((x) => x.id === e.mood);
+    return [fmtDate(e.date), fmtTime(e.date), catById(e.cat).name, e.question, e.answer, e.followQ, e.followA, m ? m.label : "", e.mood ?? ""];
+  };
+
+  function exportCSV(user, d) {
+    downloadCSV("heartnote-" + (user.name || "journal") + ".csv", [ENTRY_HEAD, ...d.entries.map(entryRow)]);
+  }
+
+  /* ---------------- admin ---------------- */
+  async function viewAdmin(user) {
+    if (user.adminPending) {
+      $app.innerHTML = `
+      <section class="panel">
+        <div class="panel-head"><span class="ph-icon">${ICON.mail}</span><div>
+          <h2>ยืนยันอีเมลผู้ดูแลก่อนนะ</h2>
+          <p class="muted">เพื่อความปลอดภัยของข้อมูลนักศึกษา ผู้ดูแลต้องยืนยันอีเมล ${esc(user.email)} ก่อน
+          กดปุ่มด้านล่าง เปิดลิงก์ในอีเมล แล้วออกจากระบบและเข้าสู่ระบบใหม่อีกครั้ง</p>
+        </div></div>
+        <button class="btn btn-primary" id="verifyBtn" type="button">${ICON.mail} ส่งอีเมลยืนยัน</button>
+      </section>`;
+      $app.querySelector("#verifyBtn").addEventListener("click", async () => {
+        try { await DB.sendVerify(); toast("ส่งอีเมลยืนยันแล้ว ตรวจกล่องจดหมายได้เลย"); } catch (e) { toast(e.message); }
+      });
+      return;
+    }
+    if (!user.isAdmin) { location.replace("#/categories"); return; }
+
+    $app.innerHTML = `<section class="panel"><p class="muted center">กำลังโหลดข้อมูลนักศึกษา…</p></section>`;
+    let all;
+    try {
+      all = await DB.listAll();
+    } catch (e) {
+      console.error(e);
+      $app.innerHTML = `<section class="panel"><h2>โหลดข้อมูลไม่สำเร็จ</h2>
+        <p class="muted">ตรวจสอบว่าเพิ่มอีเมลผู้ดูแลใน firestore.rules และ publish rules แล้ว (${esc(e.message)})</p></section>`;
+      return;
+    }
+    if (location.hash !== "#/admin") return; // ผู้ใช้เปลี่ยนหน้าไประหว่างโหลด
+
+    all.forEach((u) => u.entries.sort((a, b) => a.date.localeCompare(b.date)));
+    all.sort((a, b) => b.entries.length - a.entries.length || (a.name || "").localeCompare(b.name || "", "th"));
+    const students = all.filter((u) => !(u.email && u.email === user.email && !u.entries.length));
+    const entries = students.flatMap((u) => u.entries);
+    const moods = entries.map((e) => e.mood).filter(Boolean);
+    const avg = (arr) => (arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : "–");
+    const last = (u) => (u.entries.length ? u.entries[u.entries.length - 1].date : null);
+
+    $app.innerHTML = `
+    <section class="panel admin">
+      <div class="panel-head">
+        <span class="ph-icon">${ICON.user}</span>
+        <div>
+          <h2>ภาพรวมสำหรับผู้ดูแล</h2>
+          <p class="muted">ข้อมูลการทำกิจกรรมของนักศึกษาทุกคน${DB.mode === "local" ? " (โหมดทดลอง: แสดงเฉพาะบัญชีในเครื่องนี้)" : ""}</p>
+        </div>
+        <button class="btn btn-primary btn-sm" id="exportAll" type="button" ${entries.length ? "" : "disabled"}>${ICON.download} ดาวน์โหลดทั้งหมด (CSV)</button>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi"><small>นักศึกษา</small><b>${students.length}</b><span>คน</span></div>
+        <div class="kpi"><small>บันทึกทั้งหมด</small><b>${entries.length}</b><span>ครั้ง</span></div>
+        <div class="kpi"><small>เฉลี่ยต่อคน</small><b>${students.length ? (entries.length / students.length).toFixed(1) : "–"}</b><span>/ ${TOTAL_SESSIONS} ครั้ง</span></div>
+        <div class="kpi"><small>ความรู้สึกหลังทำกิจกรรม</small><b>${avg(moods)}</b><span>/ 5 เฉลี่ย</span></div>
+      </div>
+
+      ${students.length ? `
+      <div class="table-wrap">
+        <table class="atable">
+          <thead><tr>
+            <th>นักศึกษา</th><th>ความคืบหน้า</th>
+            ${CATS.map((c) => `<th class="num" title="${esc(c.name)}"><span class="th-icon" style="--c:${c.color}">${ICON[c.icon]}</span></th>`).join("")}
+            <th class="num">ความรู้สึกเฉลี่ย</th><th>ล่าสุด</th>
+          </tr></thead>
+          <tbody>
+          ${students.map((u, i) => {
+            const n = u.entries.length;
+            const lu = last(u);
+            return `<tr data-i="${i}" tabindex="0">
+              <td><b>${esc(u.name || "-")}</b><small>${esc(u.email || "")}</small></td>
+              <td><div class="bar"><span style="width:${Math.min(100, (n / TOTAL_SESSIONS) * 100)}%"></span></div><small>${n} / ${TOTAL_SESSIONS} ครั้ง</small></td>
+              ${CATS.map((c) => `<td class="num">${u.entries.filter((e) => e.cat === c.id).length}</td>`).join("")}
+              <td class="num">${avg(u.entries.map((e) => e.mood).filter(Boolean))}</td>
+              <td>${lu ? fmtDate(lu) : "-"}</td>
+            </tr>`;
+          }).join("")}
+          </tbody>
+        </table>
+      </div>
+      <p class="muted fine-left">แตะที่ชื่อนักศึกษาเพื่อดูบันทึกรายคน</p>
+      <div id="detail"></div>` : `<div class="empty"><p>ยังไม่มีนักศึกษาสมัครใช้งาน</p></div>`}
+    </section>`;
+
+    const exp = $app.querySelector("#exportAll");
+    if (exp) exp.addEventListener("click", () => {
+      const rows = [["ชื่อ", "อีเมล", ...ENTRY_HEAD]];
+      students.forEach((u) => u.entries.forEach((e) => rows.push([u.name, u.email, ...entryRow(e)])));
+      downloadCSV("heartnote-ทั้งหมด-" + new Date().toISOString().slice(0, 10) + ".csv", rows);
+    });
+
+    const $detail = $app.querySelector("#detail");
+    const show = (tr) => {
+      $app.querySelectorAll(".atable tr.sel").forEach((x) => x.classList.remove("sel"));
+      tr.classList.add("sel");
+      const u = students[Number(tr.dataset.i)];
+      $detail.innerHTML = `
+        <div class="detail">
+          <div class="detail-head">
+            <h3>${esc(u.name)} <small>${esc(u.email)}</small></h3>
+            ${u.entries.length ? `<button class="btn btn-ghost btn-sm" id="exportOne" type="button">${ICON.download} CSV รายคน</button>` : ""}
+          </div>
+          ${u.entries.length ? `<div class="entries">${u.entries.slice().reverse().map(entryHTML).join("")}</div>` : `<p class="muted">ยังไม่มีบันทึก</p>`}
+        </div>`;
+      const one = $detail.querySelector("#exportOne");
+      if (one) one.addEventListener("click", () => exportCSV(u, u));
+      $detail.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+    $app.querySelectorAll(".atable tbody tr").forEach((tr) => {
+      tr.addEventListener("click", () => show(tr));
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") show(tr); });
+    });
   }
 
   /* ---------------- router ---------------- */
   function route() {
     const hash = location.hash.replace(/^#\/?/, "");
     const [name, arg] = hash.split("/");
-    const user = currentUser();
+    const user = me;
 
+    if (!authReady) {
+      $topbar.hidden = true;
+      $app.innerHTML = `<div class="loading"><div class="loading-card">${cardBackSVG(CATS[0])}</div><p>กำลังสับไพ่…</p></div>`;
+      return;
+    }
     if (!user) {
       $topbar.hidden = true;
       document.body.classList.add("is-landing");
@@ -688,6 +798,7 @@
     $topbar.hidden = false;
     document.getElementById("avatar").textContent = (user.name || "?").trim().charAt(0) || "?";
     document.getElementById("avatar").title = user.name;
+    document.getElementById("adminLink").hidden = !(user.isAdmin || user.adminPending);
 
     const active = name === "draw" || name === "reflect" ? "categories" : name;
     document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === active));
@@ -698,21 +809,47 @@
       case "reflect": viewReflect(user); break;
       case "journal": viewJournal(user); break;
       case "categories": viewCategories(user); break;
+      case "admin": viewAdmin(user); break;
       default:
-        location.replace(loadData(user.email).entries.length ? "#/categories" : "#/intro");
+        location.replace(user.isAdmin ? "#/admin" : data.entries.length ? "#/categories" : "#/intro");
         return;
     }
     window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
     $app.focus({ preventScroll: true });
   }
 
-  document.getElementById("logoutBtn").addEventListener("click", () => {
-    store.del(SESSION_KEY);
+  document.getElementById("logoutBtn").addEventListener("click", async () => {
     clearDraft();
+    await DB.logout();
     location.hash = "#/";
-    route();
   });
 
   window.addEventListener("hashchange", route);
-  route();
+  route(); // แสดงหน้ากำลังโหลด
+
+  try {
+    DB = await createDB();
+  } catch (e) {
+    $app.innerHTML = `<section class="panel"><h2>เชื่อมต่อฐานข้อมูลไม่สำเร็จ</h2><p class="muted">ตรวจสอบอินเทอร์เน็ต หรือค่าใน js/firebase-config.js แล้วรีเฟรชหน้าอีกครั้ง</p></section>`;
+    return;
+  }
+
+  DB.onAuth(async (user, err) => {
+    if (err) toast("โหลดข้อมูลผู้ใช้ไม่สำเร็จ ลองรีเฟรชหน้าอีกครั้ง");
+    if (user && (!me || me.uid !== user.uid)) {
+      try { data = await DB.loadData(user.uid); } catch (e) {
+        console.error(e);
+        toast("โหลดบันทึกไม่สำเร็จ ลองรีเฟรชหน้าอีกครั้ง");
+        data = { used: Object.fromEntries(CATS.map((c) => [c.id, []])), entries: [] };
+      }
+    }
+    if (!user) { data = null; clearDraft(); }
+    me = user;
+    authReady = true;
+    if (user && (location.hash === "" || location.hash === "#/" || location.hash === "#")) {
+      location.replace(user.isAdmin ? "#/admin" : data.entries.length ? "#/categories" : "#/intro");
+      return; // hashchange จะเรียก route()
+    }
+    route();
+  });
 })();
