@@ -1,4 +1,5 @@
 import { createDB } from "./db.js";
+import { mountDiary, diaryStaticHTML, normStyle, normStickers } from "./diary.js";
 
 (async () => {
   "use strict";
@@ -142,7 +143,11 @@ import { createDB } from "./db.js";
   /* ---------------- draft (การ์ดที่กำลังทำ) ---------------- */
   let draft = null;
   try { draft = JSON.parse(sessionStorage.getItem("hn_draft") || "null"); } catch (e) { draft = null; }
-  if (draft && !draft.followQ) { draft.followQ = pick(window.REFLECTIONS); draft.followA = ""; }
+  if (draft && (!draft.followQ || !window.REFLECTIONS.includes(draft.followQ))) { draft.followQ = pick(window.REFLECTIONS); }
+  if (draft) { draft.style = normStyle(draft.style); draft.s1 = draft.s1 || []; draft.s2 = draft.s2 || []; }
+  // จำแบบสมุดที่เลือกล่าสุดไว้ในเครื่อง (ครั้งหน้าจะได้ไม่ต้องเลือกใหม่)
+  function loadStyle() { try { return normStyle(JSON.parse(localStorage.getItem("hn_style") || "null")); } catch (e) { return normStyle(); } }
+  function rememberStyle(st) { try { localStorage.setItem("hn_style", JSON.stringify(st)); } catch (e) { /* ignore */ } }
   const saveDraft = () => { try { sessionStorage.setItem("hn_draft", JSON.stringify(draft)); } catch (e) { /* ignore */ } };
   const clearDraft = () => { draft = null; try { sessionStorage.removeItem("hn_draft"); } catch (e) { /* ignore */ } };
 
@@ -258,7 +263,7 @@ import { createDB } from "./db.js";
           <li><span class="si">${ICON.calendar}</span><div><b>ระยะเวลาในการทำโปรแกรม 8 สัปดาห์</b><small>ค่อย ๆ เติมพลังใจไปทีละนิด</small></div></li>
           <li><span class="si">${ICON.clock}</span><div><b>สัปดาห์ละ 3 ครั้ง (3 วัน)</b><small>ครั้งละประมาณ 10–15 นาที รวมทั้งสิ้น 24 ครั้ง</small></div></li>
           <li><span class="si">${ICON.cards}</span><div><b>เลือกหมวดคำถามที่สนใจ แล้วสุ่มการ์ด 1 ใบ</b><small>ตั้งจิตอธิษฐานสั้น ๆ แล้วเลือกการ์ดที่ใจเรียก</small></div></li>
-          <li><span class="si">${ICON.note}</span><div><b>ตอบคำถามบนการ์ด แล้วสะท้อนตนเองต่ออีก 1 ข้อ</b><small>ไม่มีคำตอบถูกหรือผิด เขียนตามความรู้สึกจริงได้เลย</small></div></li>
+          <li><span class="si">${ICON.note}</span><div><b>จดคำตอบลงสมุดไดอารี่ แล้วสะท้อนตนเองต่ออีก 1 ข้อ</b><small>เลือกสีปก ลายกระดาษ ตัวอักษร และแปะสติกเกอร์ตกแต่งได้ตามใจ ไม่มีคำตอบถูกหรือผิด</small></div></li>
           <li><span class="si">${ICON.shuffle}</span><div><b>ระบบจะไม่สุ่มคำถามซ้ำในหมวดเดิมจนกว่าจะครบ 25 ข้อ</b><small>4 หมวด รวมทั้งหมด 100 คำถาม</small></div></li>
         </ul>
         <div class="intro-side">
@@ -398,7 +403,11 @@ import { createDB } from "./db.js";
         answer: "",
         followQ: pick(REFLECT),
         followA: "",
-        mood: null
+        mood: null,
+        style: loadStyle(),
+        style2: null,
+        s1: [],
+        s2: []
       };
       saveDraft();
       setTimeout(() => renderReveal(user, cat, d, true), 650);
@@ -430,8 +439,8 @@ import { createDB } from "./db.js";
         </div>
 
         <div class="answer-box${animate ? " pending" : ""}" id="answerBox">
-          <label for="answer" class="ans-label">${ICON.note} เขียนคำตอบของคุณ</label>
-          <textarea id="answer" rows="6" placeholder="พิมพ์คำตอบของคุณที่นี่… ไม่มีถูกหรือผิด เขียนจากใจได้เลย">${esc(draft.answer)}</textarea>
+          <p class="ans-label">${ICON.note} จดลงสมุดไดอารี่ของคุณ</p>
+          <div id="diaryA"></div>
           <div class="ans-actions">
             <button class="btn btn-ghost" id="redraw" type="button">${ICON.shuffle} สุ่มการ์ดใหม่</button>
             <button class="btn btn-primary" id="toReflect" type="button">ถัดไป ${ICON.arrowR}</button>
@@ -446,8 +455,18 @@ import { createDB } from "./db.js";
       setTimeout(() => $t.classList.add("flipped"), 120);
       setTimeout(() => $box.classList.remove("pending"), 900);
     }
-    const $ans = $app.querySelector("#answer");
-    $ans.addEventListener("input", () => { draft.answer = $ans.value; saveDraft(); });
+    const diaryA = mountDiary($app.querySelector("#diaryA"), {
+      title: draft.question,
+      label: cat.cardName,
+      text: draft.answer,
+      placeholder: "เขียนจากใจได้เลย… ไม่มีคำตอบถูกหรือผิด",
+      style: draft.style,
+      stickers: draft.s1,
+      onChange: ({ text, style, stickers }) => {
+        draft.answer = text; draft.style = style; draft.s1 = stickers; draft.style2 = null;
+        rememberStyle(style); saveDraft();
+      }
+    });
 
     $app.querySelector("#redraw").addEventListener("click", () => {
       if (draft.answer.trim() && !confirm("ต้องการสุ่มการ์ดใบใหม่ใช่ไหม? คำตอบที่พิมพ์ไว้จะหายไปนะ")) return;
@@ -455,7 +474,7 @@ import { createDB } from "./db.js";
       viewDraw(user, cat.id);
     });
     $app.querySelector("#toReflect").addEventListener("click", () => {
-      if (!draft.answer.trim()) { toast("ลองเขียนคำตอบสั้น ๆ ก่อนนะ 💛"); $ans.focus(); return; }
+      if (!draft.answer.trim()) { toast("ลองเขียนคำตอบสั้น ๆ ก่อนนะ 💛"); diaryA.focus(); return; }
       location.hash = "#/reflect";
     });
   }
@@ -486,11 +505,11 @@ import { createDB } from "./db.js";
         </div>
       </div>
 
-      <div class="qblock">
+      <div class="qblock qblock-diary">
         <span class="qnum">1</span>
         <div class="qbody">
-          <label for="followA">${esc(draft.followQ)}</label>
-          <textarea id="followA" rows="4" placeholder="พิมพ์คำตอบของคุณ…">${esc(draft.followA)}</textarea>
+          <p class="q-hint">${ICON.spark} คำถามสะท้อนตนที่สุ่มได้</p>
+          <div id="diaryB"></div>
         </div>
       </div>
 
@@ -512,8 +531,18 @@ import { createDB } from "./db.js";
       </div>
     </section>`;
 
-    const $f = $app.querySelector("#followA");
-    $f.addEventListener("input", () => { draft.followA = $f.value; saveDraft(); });
+    const diaryB = mountDiary($app.querySelector("#diaryB"), {
+      title: draft.followQ,
+      label: "สะท้อนตนเอง",
+      text: draft.followA,
+      placeholder: "ค่อย ๆ ทบทวน แล้วจดลงมาได้เลย…",
+      style: draft.style2 || draft.style,
+      stickers: draft.s2,
+      onChange: ({ text, style, stickers }) => {
+        draft.followA = text; draft.style2 = style; draft.s2 = stickers;
+        rememberStyle(style); saveDraft();
+      }
+    });
     $app.querySelectorAll(".mood").forEach((b) => b.addEventListener("click", () => {
       draft.mood = Number(b.dataset.mood);
       saveDraft();
@@ -525,7 +554,7 @@ import { createDB } from "./db.js";
     }));
 
     $app.querySelector("#saveBtn").addEventListener("click", async () => {
-      if (!draft.followA.trim()) { toast("ลองตอบคำถามสะท้อนตนสั้น ๆ อีกนิดนะ"); $f.focus(); return; }
+      if (!draft.followA.trim()) { toast("ลองตอบคำถามสะท้อนตนสั้น ๆ อีกนิดนะ"); diaryB.focus(); return; }
       if (!draft.mood) { toast("เลือกความรู้สึกของคุณตอนนี้ด้วยนะ"); return; }
       const entry = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -539,7 +568,9 @@ import { createDB } from "./db.js";
         followA2: "",
         followA3: "",
         mood: draft.mood,
-        blessing: draft.blessing
+        blessing: draft.blessing,
+        // หน้า 1 = คำตอบการ์ด, หน้า 2 = สะท้อนตน (แต่ละหน้าตกแต่งได้ต่างกัน)
+        decor: { ...normStyle(draft.style), s1: normStickers(draft.s1), p2: normStyle(draft.style2 || draft.style), s2: normStickers(draft.s2) }
       };
       const $btn = $app.querySelector("#saveBtn");
       $btn.disabled = true;
@@ -580,7 +611,8 @@ import { createDB } from "./db.js";
 
   const moodOf = (id) => MOODS.find((m) => m.id === id) || { emoji: "", label: "" };
   // คำถาม-คำตอบสะท้อนตนของบันทึกหนึ่งรายการ (บันทึกรุ่นทดลองบางรายการตอบครบ 3 ข้อ)
-  const reflectionsOf = (e) => [[e.followQ || REFLECT[0], e.followA], [REFLECT[1], e.followA2], [REFLECT[2], e.followA3]]
+  const LEGACY_REFLECT = ["เมื่อคิดถึงเรื่องนี้ คุณรู้สึกอย่างไร?", "จากเรื่องนี้ คุณสังเกตอะไรเกี่ยวกับตัวเอง?", "จากที่ได้ทบทวนครั้งนี้ คุณได้รู้อะไรเกี่ยวกับตัวเองเพิ่มขึ้นบ้าง?"];
+  const reflectionsOf = (e) => [[e.followQ || LEGACY_REFLECT[0], e.followA], [LEGACY_REFLECT[1], e.followA2], [LEGACY_REFLECT[2], e.followA3]]
     .filter(([, a]) => a);
 
   function entryHTML(e) {
@@ -597,9 +629,11 @@ import { createDB } from "./db.js";
               <span class="e-mood" title="${esc(m.label)}">${m.emoji}</span>
             </summary>
             <div class="e-body">
-              <p class="e-label">คำตอบ</p>
-              <p class="e-text">${esc(e.answer)}</p>
-              ${reflectionsOf(e).map(([q, a]) => `
+              <div class="e-pages">
+                ${diaryStaticHTML({ style: e.decor, stickers: e.decor && e.decor.s1, title: e.question, text: e.answer, date: e.date, label: c.cardName })}
+                ${diaryStaticHTML({ style: (e.decor && e.decor.p2) || e.decor, stickers: e.decor && e.decor.s2, title: e.followQ, text: e.followA, date: e.date, label: "สะท้อนตนเอง" })}
+              </div>
+              ${reflectionsOf(e).slice(1).map(([q, a]) => `
               <p class="e-label">${esc(q)}</p>
               <p class="e-text">${esc(a)}</p>`).join("")}
               <p class="e-bless">${ICON.spark} ${esc(e.blessing)}</p>

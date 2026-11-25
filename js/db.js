@@ -25,7 +25,7 @@ function deriveUsed(entries) {
 }
 const fromRow = (r) => ({
   id: r.id, date: r.date, cat: r.cat, qid: r.qid, question: r.question, answer: r.answer,
-  followQ: r.follow_q, followA: r.follow_a, followA2: r.follow_a2, followA3: r.follow_a3, mood: r.mood, blessing: r.blessing
+  followQ: r.follow_q, followA: r.follow_a, followA2: r.follow_a2, followA3: r.follow_a3, mood: r.mood, blessing: r.blessing, decor: r.decor || {}
 });
 
 async function supabaseBackend() {
@@ -106,7 +106,7 @@ async function supabaseBackend() {
     async addEntry(uid, e) {
       ok(await sb.from("entries").insert({
         id: e.id, date: e.date, cat: e.cat, qid: e.qid, question: e.question, answer: e.answer,
-        follow_q: e.followQ, follow_a: e.followA, follow_a2: e.followA2, follow_a3: e.followA3, mood: e.mood, blessing: e.blessing
+        follow_q: e.followQ, follow_a: e.followA, follow_a2: e.followA2, follow_a3: e.followA3, mood: e.mood, blessing: e.blessing, decor: e.decor || {}
       }));
     },
     async resetUsed() { /* คำนวณจากบันทึกอัตโนมัติ ไม่ต้องเก็บแยก */ },
